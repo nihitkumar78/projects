@@ -166,7 +166,7 @@ secret gets used later, so you never have to guess.
 | Secret / Credential | Created in | Stored as | Used by (where exactly) |
 |---|---|---|---|
 | GitHub Personal Access Token | Step 2 | Jenkins credential `git` (Username+Password kind); also pasted again into ArgoCD's repo connection (Step 44) | Jenkins `Git Checkout` stage, Jenkins `Update Manifests Repo` stage, GitHub webhook auth (implicitly, via repo access), ArgoCD repo polling |
-| AWS IAM user `medibot-admin` access key | Step 3 | `~/.aws/credentials` on the management server (via `aws configure` in Step 7) | `terraform apply`/`destroy` only — never touches Jenkins |
+| `medibot-admin` console password | Step 3 | Your memory / password manager — no access key ever exists for this user | Logging into the AWS Console during `aws login --remote` (Step 7), which produces short-lived, auto-refreshing CLI credentials used by `terraform apply`/`destroy` — never touches Jenkins |
 | EC2 key pair `delete_later` (`.pem` file) | Step 4 | Your local machine only | SSH into the management server and the Jenkins server (SonarQube/Nexus use SSM instead — no key needed) |
 | Terraform `db_password` variable | Supplied at `terraform apply` time (Step 8) | **Never committed to Git** — pass via `-var`, a gitignored `.tfvars` file, or `TF_VAR_db_password` | Only used by the unused RDS instance (Section 6) — if you delete the RDS resources, this variable can be deleted too |
 | AWS IAM user `medibot-jenkins-ecr` access key | Step 15 | Jenkins credential `aws-creds` (AWS Credentials kind) | Jenkins `Push to ECR` stage |
@@ -366,22 +366,29 @@ will work without it.
 
 ## Phase 2 — AWS Account Setup
 
-### Step 3 — Create an IAM User for Terraform
+### Step 3 — Create an IAM User for Terraform (Console Access Only — No Access Keys)
 
 **AWS Console → IAM → Users → Create User**
 
 | Field | Value |
 |---|---|
 | Username | `medibot-admin` |
+| ✅ Provide user access to the AWS Management Console | checked |
+| Console password | Custom password (set one, save it) |
 | Attach policy | `AdministratorAccess` |
 
-Then **Create access key → Application running outside AWS → Download
-the CSV**. Save the Access Key ID and Secret Access Key — you'll type
-these into `aws configure` on the management server in Step 7.
+> 🚫 **Do NOT create an access key for this user.** Older versions of
+> this guide had you download an access-key CSV and paste it into
+> `aws configure` on the management server — long-lived static
+> credentials sitting in plaintext on a box. [Step 7](#step-7--connect-the-management-server-to-aws)
+> uses a much better approach (`aws login --remote`) that only needs
+> this user to be able to **sign in to the Console with a password** —
+> no access key is ever created or stored anywhere.
 
-**Why:** Terraform needs real AWS credentials to create every piece of
-infrastructure in this guide — VPC, EC2s, EKS, IAM roles. It has no
-other way to authenticate.
+**Why:** Terraform needs an identity with real AWS permissions to
+create every piece of infrastructure in this guide — VPC, EC2s, EKS,
+IAM roles. This user provides that identity; Step 7 is how the
+management server actually borrows it.
 
 **If skipped:** `terraform apply` fails immediately with a "no valid
 credential sources" error before creating anything.
@@ -511,35 +518,55 @@ sudo apt install git -y
 
 ### Step 7 — Connect the Management Server to AWS
 
-This is the step that's easy to gloss over, so here it is in full.
-`aws configure` isn't just one magic command — understand what it's
-actually doing before you run it.
+> This step deliberately does **not** use static access keys. Earlier
+> drafts of this guide had you download an access-key CSV in Step 3
+> and paste it into `aws configure` — long-lived credentials sitting
+> in plaintext on the box for as long as it exists. AWS CLI v2 ships a
+> command built for exactly this situation instead: `aws login`, with
+> a `--remote` mode specifically for "I'm SSH'd into a box with no
+> local browser."
+
+Set the region once, then start the login flow:
 
 ```bash
-aws configure
+aws configure set region ap-south-1
+aws login --remote
 ```
 
-You'll be prompted for four things, one at a time:
+This prints a URL and then waits:
 
 ```
-AWS Access Key ID [None]: <paste the Access Key ID from Step 3's CSV>
-AWS Secret Access Key [None]: <paste the Secret Access Key from Step 3's CSV>
-Default region name [None]: ap-south-1
-Default output format [None]: json
+Browser will not be automatically opened.
+Please visit the following URL:
+
+https://ap-south-1.signin.aws.amazon.com/v1/authorize?response_type=code&client_id=...
+
+Enter the authorization code displayed in your browser:
 ```
 
-**What this command actually does:** it writes two plaintext files on
-this EC2 instance:
+**What to do with that URL:** copy it and open it in a browser **on
+your own laptop** — not on the EC2 instance, which has no GUI. That's
+the whole point of `--remote`: it skips trying to launch a local
+browser (which would fail over SSH) and instead gives you a link to
+open wherever you actually have one.
 
-- `~/.aws/credentials` — holds the Access Key ID and Secret Access Key
-  you just typed
-- `~/.aws/config` — holds the region and output format
+1. Open the URL on your own machine.
+2. Log into the AWS Management Console with the `medibot-admin`
+   user's **console password** from Step 3 (no access key needed at
+   all — this flow authenticates the same way logging into
+   console.aws.amazon.com in a browser normally does).
+3. Approve the request. The page shows you an authorization code.
+4. Copy that code back into the waiting terminal prompt on the
+   management server and press Enter.
 
-Every AWS CLI command you run afterward (and every `terraform apply`)
-reads from these two files automatically — you never pass credentials
-explicitly again on this box.
+The CLI exchanges that code for **temporary credentials plus a refresh
+token**, cached locally (not written as a static key anywhere). As
+long as the refresh token stays valid, every subsequent AWS CLI call
+and every `terraform apply`/`destroy` on this box transparently uses
+auto-refreshing temporary credentials — you never type or paste a
+long-lived secret onto this machine at all.
 
-**Verify it actually worked** before moving on:
+**Verify it actually worked:**
 
 ```bash
 aws sts get-caller-identity
@@ -555,35 +582,29 @@ You should get back something like:
 }
 ```
 
-If this fails (`Unable to locate credentials`, or an `AccessDenied`),
-stop here — nothing downstream will work. Double-check you pasted the
-Access Key ID and Secret Access Key into the right prompts (it's an
-easy swap to make), and that there are no leading/trailing spaces from
-copy-pasting out of the CSV.
+If `aws login --remote` fails with a region-related error, it's
+because the region wasn't set first — re-run the `aws configure set
+region ap-south-1` line above before retrying.
 
-**Why the `medibot-admin` user specifically, and not some other IAM
-user?** This is the Terraform-provisioning identity from Step 3, with
-broad `AdministratorAccess` — it's the only identity in this whole
-project that's allowed to create/destroy infrastructure itself. Every
-other credential you'll create later (Jenkins' ECR push user, for
-example) is deliberately narrower.
+**Why `medibot-admin` specifically, and not some other IAM identity?**
+This is the Terraform-provisioning identity from Step 3, with broad
+`AdministratorAccess` — it's the only identity in this whole project
+that's allowed to create/destroy infrastructure itself. Every other
+credential you'll create later (Jenkins' ECR push user, for example)
+is deliberately narrower — and uses a plain access key instead,
+because it runs **unattended** inside a CI pipeline with no human
+present to approve a browser login each time, which is exactly the
+case `aws login` isn't designed for (its own docs call it out as "for
+local development").
 
-> ⚠️ **Security note:** these are long-lived, static credentials
-> sitting in plaintext on this EC2 instance for as long as it exists.
-> That's an acceptable trade-off for a single-person learning project
-> on a server you'll terminate when you're done (see the
-> [Teardown Manual](#complete-teardown-manual)) — it is *not* how
-> you'd want to manage credentials for a real production system, where
-> you'd reach for IAM roles / AWS SSO / short-lived credentials
-> instead of a static access key that never expires on its own.
-
-> 💡 **If you ever manage more than one AWS account from the same
-> machine:** `aws configure --profile <name>` creates a *named
-> profile* instead of overwriting the default one, and you select it
-> per-command with `--profile <name>` or by setting
-> `AWS_PROFILE=<name>`. Not needed for this guide (one account, one
-> server, one profile), but worth knowing once you're doing this for
-> real.
+> 💡 **A production-grade EC2 instance** would typically skip
+> human-driven login entirely and attach an **IAM Role** directly to
+> the instance (an "instance profile") instead, so the box gets its
+> own auto-rotating credentials with no login step of any kind. This
+> guide uses `aws login --remote` instead because it needs a human to
+> run Terraform interactively a handful of times, not continuously —
+> for that workflow, a one-time browser approval beats either static
+> keys or setting up a dedicated instance role.
 
 ### Step 8 — Clone the Terraform Repo and Deploy Infrastructure
 
@@ -2091,7 +2112,7 @@ kubectl top pods -n webapps
 | HPA shows `Degraded` | `metrics-server` isn't installed or is crash-looping — see [Step 12](#step-12--install-metrics-server) |
 | A PVC is stuck `Pending` | EBS CSI driver isn't healthy — see [Step 13](#step-13--verify-the-ebs-csi-driver-already-installed-by-terraform) |
 | Lost the `.pem` key file | Use EC2 Instance Connect to push a temporary key instead of recovering the original (valid ~60 seconds — push right before connecting): `aws ec2-instance-connect send-ssh-public-key --instance-id <id> --instance-os-user ubuntu --ssh-public-key file://temp_key.pub --availability-zone <az>` |
-| `aws sts get-caller-identity` fails on the management server | Credentials weren't entered correctly in [Step 7](#step-7--connect-the-management-server-to-aws) — re-run `aws configure` and check for stray whitespace from copy-pasting |
+| `aws sts get-caller-identity` fails on the management server | The `aws login --remote` flow in [Step 7](#step-7--connect-the-management-server-to-aws) wasn't completed, or the refresh token expired — re-run `aws configure set region ap-south-1` then `aws login --remote` again |
 
 ---
 
@@ -2284,10 +2305,10 @@ aws ec2 describe-instances --filters "Name=tag:Name,Values=medibot-admin" \
 aws ec2 terminate-instances --instance-ids <instance-id>
 ```
 
-> This is also, incidentally, when the static AWS credentials from
-> [Step 7](#step-7--connect-the-management-server-to-aws) stop
-> existing anywhere at all — another reason not to leave this instance
-> running longer than you need it.
+> This also destroys the cached `aws login` credentials from
+> [Step 7](#step-7--connect-the-management-server-to-aws) along with
+> the instance — since they were already short-lived and auto-expiring
+> rather than static keys, there's nothing further to revoke.
 
 ### Step 12 — Clean Up the Dangling Route53 Record
 
