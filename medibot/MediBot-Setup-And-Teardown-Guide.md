@@ -34,7 +34,7 @@
 15. [Phase 9 — Nexus Setup](#phase-9--nexus-setup)
 16. [Phase 10 — Jenkins Configuration](#phase-10--jenkins-configuration)
 17. [Phase 11 — Kubernetes Namespace](#phase-11--kubernetes-namespace)
-18. [Phase 12 — Populate the Manifests Repo](#phase-12--populate-the-manifests-repo)
+18. [Phase 12 — Review the Manifests Repo](#phase-12--review-the-manifests-repo)
 19. [Phase 13 — ArgoCD Setup](#phase-13--argocd-setup)
 20. [Phase 14 — Jenkins Pipeline Job](#phase-14--jenkins-pipeline-job)
 21. [Phase 15 — Verify](#phase-15--verify)
@@ -103,7 +103,7 @@ flowchart TD
 
 | # | Component | Runs as | Purpose |
 |---|---|---|---|
-| 1 | GitHub repos (`medibot-app`, `medibot-manifests`) | — | Source of truth, split CI repo from CD repo |
+| 1 | GitHub repos (`medibot-app`, `medibot-infra`, `medibot-manifests`) | — | Source of truth, split source / infra-as-code / CD repos |
 | 2 | Management server | EC2 | Runs Terraform + kubectl safely, outside your laptop |
 | 3 | Terraform | CLI on management server | Provisions VPC, 3 EC2s, EKS cluster, EBS CSI driver, RDS (unused — see Section 6), IAM roles |
 | 4 | Jenkins | EC2 (bare install, not containerized) | CI: build, test, scan, publish, push, trigger CD |
@@ -259,7 +259,7 @@ resource "aws_db_instance" "mysql" {
 
 ...and `output.tf` even exports `rds_endpoint`. But the actual
 application manifests (`mysql.yaml`, in
-[Phase 12](#phase-12--populate-the-manifests-repo)) deploy MySQL as a
+[Phase 12](#phase-12--review-the-manifests-repo)) deploy MySQL as a
 **separate pod inside the cluster** instead, with its own
 `PersistentVolumeClaim` and its own `mysql-secret` — and the app's
 `MYSQL_HOST` environment variable points at the in-cluster
@@ -298,7 +298,7 @@ is a placeholder pointing at a *different* AWS account's ECR
 repository, inherited from the project this was originally templated
 from. On the very first ArgoCD sync (before Jenkins has ever pushed a
 real image), the `medibot` pod will fail with `ImagePullBackOff` —
-**this is expected**, not a bug, and [Phase 12](#phase-12--populate-the-manifests-repo)
+**this is expected**, not a bug, and [Phase 12](#phase-12--review-the-manifests-repo)
 has you fix the `image:` field to point at your own ECR repo before
 you ever commit it, which avoids ever seeing that failure state.
 
@@ -314,21 +314,27 @@ history otherwise.
 
 ### Step 1 — Create GitHub Repos
 
-Go to **github.com → New Repository** and create two **separate,
+Go to **github.com → New Repository** and create three **separate,
 private** repos:
 
-| Repo | Visibility | Initialize with README |
-|---|---|---|
-| `medibot-app` | Private | Yes |
-| `medibot-manifests` | Private | Yes |
+| Repo | Visibility | Initialize with README | Holds |
+|---|---|---|---|
+| `medibot-app` | Private | Yes | Application source code (Jenkinsfile, `pom.xml`, Java source) |
+| `medibot-infra` | Private | Yes | Terraform (`main.tf`, `variable.tf`, `output.tf`) |
+| `medibot-manifests` | Private | Yes | Kubernetes YAML only (what ArgoCD watches) |
 
-**Why two repos, not one?** This is the GitOps split described in
-[Section 2](#2-how-the-pieces-talk-to-each-other): `medibot-app` holds
-application source code and is owned by Jenkins (CI). `medibot-manifests`
-holds only Kubernetes YAML and is owned by ArgoCD (CD). Keeping them
-separate means a source-code change and a "what's currently deployed"
-change are always distinguishable in Git history, and ArgoCD never
-needs to know anything about how the app is built.
+**Why three repos, not one?** This is the GitOps split described in
+[Section 2](#2-how-the-pieces-talk-to-each-other), plus a third split
+for infrastructure-as-code: `medibot-app` holds application source and
+is owned by Jenkins (CI). `medibot-infra` holds the Terraform that
+provisions the AWS infrastructure itself and is only ever touched
+manually from the management server (Phase 3) — nothing in the CI/CD
+pipeline reads or writes to it. `medibot-manifests` holds only
+Kubernetes YAML and is owned by ArgoCD (CD). Keeping all three separate
+means a source-code change, an infrastructure change, and a
+"what's-currently-deployed" change are always distinguishable in Git
+history, and ArgoCD never needs to know anything about how the app is
+built or how the underlying AWS resources were created.
 
 **If skipped / merged into one repo:** ArgoCD would end up watching
 your entire source tree, triggering sync attempts on every commit
@@ -609,8 +615,8 @@ local development").
 ### Step 8 — Clone the Terraform Repo and Deploy Infrastructure
 
 ```bash
-git clone <YOUR TERRAFORM REPO>
-cd <YOUR TERRAFORM REPO>
+git clone https://github.com/<YOUR-USERNAME>/medibot-infra.git
+cd medibot-infra
 
 terraform init      # downloads providers, sets up local state
 terraform plan       # shows what WILL be created — review before applying
@@ -794,7 +800,7 @@ kubectl top pods -n webapps
 ```
 
 **Why:** the Horizontal Pod Autoscaler (`hpa.yaml`, created in
-[Phase 12](#phase-12--populate-the-manifests-repo)) needs the
+[Phase 12](#phase-12--review-the-manifests-repo)) needs the
 `metrics.k8s.io` API to read live CPU/memory usage and decide whether
 to scale replicas up or down. EKS does **not** install this by default
 — it's easy to forget.
@@ -807,7 +813,7 @@ requested resource (get pods.metrics.k8s.io)` — it can never scale.
 
 This one isn't something you install — Terraform already did it for
 you back in Step 8, as part of `terraform apply`. It's worth
-understanding and verifying now, because [Phase 12](#phase-12--populate-the-manifests-repo)'s
+understanding and verifying now, because [Phase 12](#phase-12--review-the-manifests-repo)'s
 MySQL pod (and Phase 16's Prometheus/Grafana) both depend on it
 working, and a silent failure here shows up much later as a confusing
 "PVC stuck in Pending" with no obvious cause.
@@ -879,7 +885,7 @@ production-hardened version would scope this down with IRSA instead.
 
 **Bedrock model note:** only Amazon Nova models are active in
 `ap-south-1`. You'll set this in the app's ConfigMap in
-[Phase 12](#phase-12--populate-the-manifests-repo):
+[Phase 12](#phase-12--review-the-manifests-repo):
 
 ```yaml
 BEDROCK_MODEL_ID: "apac.amazon.nova-lite-v1:0"
@@ -1376,21 +1382,35 @@ kubectl cluster-info
 
 ---
 
-## Phase 12 — Populate the Manifests Repo
+## Phase 12 — Review the Manifests Repo
 
-This entire phase was **missing** from earlier versions of this guide
-— without it, ArgoCD (Phase 13) would have nothing valid to sync, and
-the app would never get a database. Everything here gets committed to
-your `medibot-manifests` repo, at the repo root (ArgoCD's Application
-is configured with `Path: .` in Step 45 — it watches everything in the
-root).
+Unlike `medibot-app` and `medibot-infra`, you do **not** create
+`medibot-manifests` from scratch — it's a **third, separate repo** that
+already exists with these 5 files already committed and already
+correct for this project (not placeholders — this is pulled directly
+from the real repo content). Without it, ArgoCD (Phase 13) would have
+nothing valid to sync, and the app would never get a database — which
+is exactly why earlier drafts of this guide missed this phase
+entirely: it's easy to forget a step exists when the repo it concerns
+is never touched during the AWS-side work.
 
-Clone the repo locally (or work directly on the management server) and
-create each file below.
+```bash
+git clone https://github.com/<YOUR-USERNAME>/medibot-manifests.git
+cd medibot-manifests
+ls
+# LICENSE  README.md  deployment.yaml  hpa.yaml  ingress.yaml  mysql.yaml  storageclass.yaml
+```
 
-### Step 38 — Create the EBS StorageClass
+All five YAML files live at the repo **root** (ArgoCD's Application is
+configured with `Path: .` in Step 45 — it watches everything in the
+root). For a redeploy of this exact project, **none of these need to
+be edited** — walk through them below to understand what each one does
+and confirm nothing's missing, then move straight to
+[Phase 13](#phase-13--argocd-setup).
 
-`storageclass.yaml`:
+### Step 38 — The EBS StorageClass
+
+`storageclass.yaml` (as it already exists in the repo):
 
 ```yaml
 apiVersion: storage.k8s.io/v1
@@ -1419,9 +1439,9 @@ safety net against accidental data loss. (This is also exactly why
 these retained volumes don't clean themselves up and need a manual
 pass.)
 
-### Step 39 — Create the MySQL Manifest
+### Step 39 — The MySQL Manifest
 
-`mysql.yaml`:
+`mysql.yaml` (as it already exists in the repo):
 
 ```yaml
 ---
@@ -1432,7 +1452,7 @@ metadata:
   namespace: webapps
 type: Opaque
 stringData:
-  MYSQL_ROOT_PASSWORD: "CHANGE_ME_before_committing"
+  MYSQL_ROOT_PASSWORD: "MediBot@2025"
   MYSQL_DATABASE: "medibotdb"
 ---
 apiVersion: v1
@@ -1507,10 +1527,14 @@ spec:
     app: mysql
 ```
 
-> ⚠️ Change `MYSQL_ROOT_PASSWORD` to a real value of your own before
-> you commit this — see the plaintext-secret callout in
-> [Section 3](#3-secrets--credentials-master-reference). Note that
-> `strategy: Recreate` (not the default `RollingUpdate`) matters here
+> ⚠️ `MYSQL_ROOT_PASSWORD` is still the sample value here, committed in
+> plaintext — see the callout in
+> [Section 3](#3-secrets--credentials-master-reference). It's not
+> urgent to change for a redeploy of an already-running personal
+> project, but if you ever intend to show this repo to anyone else or
+> treat it as more than a learning exercise, rotate it and consider a
+> proper secrets manager instead of a plain committed `Secret`. Note
+> that `strategy: Recreate` (not the default `RollingUpdate`) matters here
 > — MySQL's PVC is `ReadWriteOnce`, so two MySQL pods can never mount
 > it simultaneously; a rolling update would try to start the new pod
 > before killing the old one and get stuck.
@@ -1525,9 +1549,9 @@ this MySQL is never scaled beyond 1 replica, it's an acceptable
 simplification, just know it's not the textbook-correct choice for a
 production database.
 
-### Step 40 — Create the MediBot App Manifest
+### Step 40 — The MediBot App Manifest
 
-`deployment.yaml`:
+`deployment.yaml` (as it already exists in the repo):
 
 ```yaml
 ---
@@ -1559,7 +1583,7 @@ spec:
     spec:
       containers:
       - name: medibot
-        image: 719152986284.dkr.ecr.ap-south-1.amazonaws.com/medibot:latest
+        image: 719152986284.dkr.ecr.ap-south-1.amazonaws.com/medibot:v8
         ports:
         - containerPort: 8080
         env:
@@ -1624,14 +1648,18 @@ spec:
     app: medibot
 ```
 
-> 📝 **Important:** the `image:` line above already uses **your own**
-> ECR account ID (`719152986284`), not a placeholder from someone
-> else's account — this is the fix for [Section 6.2](#62--the-sample-app-deployment-points-at-someone-elses-ecr-image).
-> The `:latest` tag doesn't matter much — Jenkins' `Update Manifests
+> 📝 The `image:` tag (`:v8` above, or whatever it reads when you
+> check) reflects whichever build number Jenkins last pushed — it
+> doesn't matter what it says right now. Jenkins' `Update Manifests
 > Repo` stage overwrites this exact line with the real build tag
 > (`sed -i "s|image:.*medibot:.*|image: ...|g"`) on every successful
-> pipeline run, so whatever tag you put here only matters for this
-> very first sync, before Jenkins has ever run once.
+> pipeline run, so the very next build you trigger replaces it anyway.
+> It already points at **your own** ECR account (`719152986284`), so
+> there's no [Section 6.2](#62--the-sample-app-deployment-points-at-someone-elses-ecr-image)-style
+> cross-account `ImagePullBackOff` to worry about on a redeploy — that
+> concern only applies if you're starting over from the original
+> tutorial template this project was based on, not from this repo as
+> it exists today.
 
 **Why the long `initialDelaySeconds: 90` on the health probes:** Spring
 Boot applications with a database connection and AWS SDK
@@ -1640,9 +1668,9 @@ initialization routinely take 60–90 seconds to become ready on
 repeatedly killing the pod for "failing" its liveness probe before it
 ever finished starting up — an easy trap to fall into.
 
-### Step 41 — Create the HPA Manifest
+### Step 41 — The HPA Manifest
 
-`hpa.yaml`:
+`hpa.yaml` (as it already exists in the repo):
 
 ```yaml
 apiVersion: autoscaling/v2
@@ -1671,9 +1699,9 @@ feeds — without it installed and healthy, this HPA object exists but
 can never actually read current CPU usage, and shows `Degraded` in
 ArgoCD.
 
-### Step 42 — Create the Ingress Manifest (HTTP-Only, for Now)
+### Step 42 — The Ingress Manifest
 
-`ingress.yaml`:
+`ingress.yaml` (as it already exists in the repo):
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -1685,6 +1713,9 @@ metadata:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:ap-south-1:719152986284:certificate/8653e0eb-a10d-4250-af1f-d6f0915ca1d5"
 spec:
   rules:
   - host: medibot.nihitdevops.xyz
@@ -1699,25 +1730,35 @@ spec:
               number: 80
 ```
 
-**Why HTTP-only for now:** this gets the ALB created and the app
-reachable immediately once ArgoCD syncs, without needing an ACM
-certificate to exist yet. [Phase 17](#phase-17--domain--ssl-setup)
-comes back and adds the `443` listener, the `ssl-redirect` annotation,
-and the `certificate-arn` once the certificate is actually issued —
-there's no reason to block your first working deployment on SSL being
-ready.
+> 📝 **This already has HTTPS fully configured** — the `443` listener,
+> `ssl-redirect`, and the real `certificate-arn` are all already here,
+> because the `*.nihitdevops.xyz` ACM certificate is the one thing this
+> project deliberately keeps alive across every teardown (see
+> [Step 53](#step-53--acm-certificate)). That's why, unlike a from-scratch
+> deployment on a brand-new domain, this redeploy doesn't need an
+> HTTP-only staging phase — the moment ArgoCD syncs this file and the
+> ALB Controller provisions the ALB, it comes up with HTTPS already
+> working. [Phase 17](#phase-17--domain--ssl-setup) only needs to
+> re-verify the certificate is still `Issued` and re-create the Route53
+> record that teardown deleted — it does **not** need to edit this file.
 
-### Step 43 — Commit and Push All Manifests
+### Step 43 — Nothing to Commit (Unless You Changed Something)
+
+Since all five files above already match what this project needs, a
+redeploy requires **no edits and no push** to `medibot-manifests` at
+all — just leave the clone from Step 38 as a local reference, and move
+straight to [Phase 13](#phase-13--argocd-setup) to point ArgoCD at the
+repo as it stands on GitHub.
+
+If you did change something while reviewing (e.g. rotating
+`MYSQL_ROOT_PASSWORD` per the warning in Step 39), commit and push it
+now, before Phase 13, so ArgoCD's first sync picks up the change:
 
 ```bash
-git add storageclass.yaml mysql.yaml deployment.yaml hpa.yaml ingress.yaml
-git commit -m "Initial MediBot Kubernetes manifests"
+git add mysql.yaml   # or whichever file(s) you actually edited
+git commit -m "Rotate MySQL root password"
 git push origin main
 ```
-
-Nothing deploys yet — ArgoCD doesn't exist in the cluster until
-[Phase 13](#phase-13--argocd-setup). Once it does and you point it at
-this repo, all five of these files sync in a single first pass.
 
 ---
 
@@ -1790,11 +1831,12 @@ is just the DNS name for "my own API server" — conceptually identical
 to how `localhost` always means "this machine," regardless of which
 machine you happen to be on.
 
-**What happens on first sync:** ArgoCD reads every manifest you
-committed in Phase 12 and applies them all — `StorageClass`,
-`mysql-secret`, `mysql-pvc`, the `mysql` Deployment + Service, the
-`medibot-config` ConfigMap, the `medibot` Deployment + Service, the
-`HorizontalPodAutoscaler`, and the HTTP-only `Ingress` — in one pass.
+**What happens on first sync:** ArgoCD reads every manifest already
+sitting in `medibot-manifests` (reviewed in Phase 12) and applies them
+all — `StorageClass`, `mysql-secret`, `mysql-pvc`, the `mysql`
+Deployment + Service, the `medibot-config` ConfigMap, the `medibot`
+Deployment + Service, the `HorizontalPodAutoscaler`, and the
+already-HTTPS-ready `Ingress` — in one pass.
 
 **What `Self Heal` actually does** (this matters a lot for teardown
 later): if anyone or anything manually changes or deletes a resource
@@ -2006,41 +2048,26 @@ Add the resulting CNAME record in **Route53 → nihitdevops.xyz →
 Create record**, then wait for ACM's status to flip to `Issued` and
 copy the Certificate ARN.
 
-### Step 54 — Add HTTPS to `ingress.yaml`
+### Step 54 — Confirm `ingress.yaml` Still Has the Right Certificate ARN
 
-Update the same `ingress.yaml` you created back in
-[Step 42](#step-42--create-the-ingress-manifest-http-only-for-now),
-adding the `443` listener, SSL redirect, and certificate:
+As shown back in [Phase 12, Step 42](#step-42--the-ingress-manifest),
+`ingress.yaml` in `medibot-manifests` already has HTTPS fully
+configured — the `443` listener, `ssl-redirect`, and a
+`certificate-arn` annotation. The only thing worth double-checking here
+is that the ARN in the file still matches the certificate you just
+verified in Step 53 (ACM certificate ARNs don't change across
+teardowns as long as you reuse the same certificate, so normally there
+is nothing to edit):
 
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: medibot-ingress
-  namespace: webapps
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
-    alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/certificate-arn: "<ACM_CERT_ARN from Step 53>"
-spec:
-  rules:
-  - host: medibot.nihitdevops.xyz
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: medibot-service
-            port:
-              number: 80
+```bash
+grep certificate-arn medibot-manifests/ingress.yaml
 ```
 
-Commit → ArgoCD auto-syncs the change to the cluster, and the ALB
-Controller reconfigures the existing ALB listener to add HTTPS.
+If it matches the ARN from Step 53, there's nothing to commit — move
+on to Step 55. If you ever *do* request a brand-new certificate (a
+different domain, or the old one expired), update the annotation with
+the new ARN, then commit and push — ArgoCD auto-syncs the change and
+the ALB Controller reconfigures the existing ALB listener.
 
 ### Step 55 — Add the Route53 A Record
 
@@ -2207,7 +2234,7 @@ Step 4.
 ### Step 4 — Terraform Destroy
 
 ```bash
-cd medibot-app/01-terraform
+cd medibot-infra
 terraform plan -destroy      # sanity check — confirm the resource count
 terraform destroy -auto-approve
 ```
