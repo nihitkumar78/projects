@@ -689,22 +689,22 @@ Every cross-reference in this project, in one place:
 
 ```mermaid
 flowchart TD
-    SC["StorageClass: ebs-sc"] -.->|storageClassName| PVC["PVC: mysql-pvc"]
-    SEC["Secret: mysql-secret"] -->|secretKeyRef| MYDEP["Deployment: mysql"]
-    PVC -->|claimName| MYDEP
-    MYDEP -->|creates, labeled app=mysql| MYPOD["Pod(s): mysql"]
-    MYSVC["Service: mysql-service"] -->|selector app=mysql| MYPOD
+    SC["StorageClass: ebs-sc"] -.->|"storageClassName"| PVC["PVC: mysql-pvc"]
+    SEC["Secret: mysql-secret"] -->|"secretKeyRef"| MYDEP["Deployment: mysql"]
+    PVC -->|"claimName"| MYDEP
+    MYDEP -->|"creates, label app=mysql"| MYPOD["Pod(s): mysql"]
+    MYSVC["Service: mysql-service"] -->|"selector app=mysql"| MYPOD
 
-    CM["ConfigMap: medibot-config\n(MYSQL_HOST=mysql-service)"] -.->|"string match, DNS resolved"| MYSVC
-    CM -->|configMapKeyRef| APPDEP["Deployment: medibot"]
-    SEC -->|secretKeyRef\n(cross-file!)| APPDEP
-    APPDEP -->|creates, labeled app=medibot| APPPOD["Pod(s): medibot"]
-    APPSVC["Service: medibot-service"] -->|selector app=medibot| APPPOD
+    CM["ConfigMap: medibot-config"] -.->|"MYSQL_HOST value, DNS resolved"| MYSVC
+    CM -->|"configMapKeyRef"| APPDEP["Deployment: medibot"]
+    SEC -->|"secretKeyRef, cross-file"| APPDEP
+    APPDEP -->|"creates, label app=medibot"| APPPOD["Pod(s): medibot"]
+    APPSVC["Service: medibot-service"] -->|"selector app=medibot"| APPPOD
 
-    HPA["HPA: medibot-hpa"] -->|scaleTargetRef| APPDEP
+    HPA["HPA: medibot-hpa"] -->|"scaleTargetRef"| APPDEP
 
-    ING["Ingress: medibot-ingress"] -->|backend.service| APPSVC
-    ING -.->|certificate-arn| ACM[("AWS ACM cert")]
+    ING["Ingress: medibot-ingress"] -->|"backend.service"| APPSVC
+    ING -.->|"certificate-arn"| ACM[("AWS ACM cert")]
 ```
 
 ---

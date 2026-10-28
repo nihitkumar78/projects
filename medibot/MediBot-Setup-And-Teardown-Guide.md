@@ -76,21 +76,21 @@ flowchart TD
     REPO2 -->|polls / auto-syncs| ARGOCD
 
     subgraph EKS["Amazon EKS Cluster"]
-        ARGOCD["ArgoCD (GitOps)"] -->|deploys all manifests| APP["medibot pods\n(ConfigMap + Secret env)"]
-        ARGOCD -->|deploys| MYSQL["mysql pod\n(PVC via ebs-sc)"]
+        ARGOCD["ArgoCD (GitOps)"] -->|deploys all manifests| APP["medibot pods<br/>(ConfigMap + Secret env)"]
+        ARGOCD -->|deploys| MYSQL["mysql pod<br/>(PVC via ebs-sc)"]
         APP -->|reads/writes| MYSQL
         ALBCTRL["AWS Load Balancer Controller"] -->|creates| ALB["ALB (Ingress)"]
         APP --> ALBCTRL
         APP -->|calls| BEDROCK[("AWS Bedrock — Nova model")]
         METRICS["metrics-server"] -.->|feeds| HPA["HPA"]
         PROM["Prometheus + Grafana"] -.->|scrapes| APP
-        EBSCSI["EBS CSI driver\n(auto-installed by Terraform)"] -.->|provisions volumes for| MYSQL
+        EBSCSI["EBS CSI driver<br/>(auto-installed by Terraform)"] -.->|provisions volumes for| MYSQL
     end
 
     ALB --> DNS[("Route53 + ACM: medibot.nihitdevops.xyz")]
     DNS --> USER["End user's browser"]
 
-    RDS[("⚠ RDS: medibot-mysql\n(created by Terraform, NOT used by the app)")]
+    RDS[("⚠ RDS: medibot-mysql<br/>(created by Terraform, NOT used by the app)")]
     style RDS stroke-dasharray: 5 5,fill:#fee,stroke:#c33
 ```
 
